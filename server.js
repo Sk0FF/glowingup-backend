@@ -129,6 +129,12 @@ app.get('/api/admin/stats', authMiddleware, (req, res) => {
   const delivered = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'delivered'").get();
   res.json({ total: total.count, revenue: total.revenue || 0, pending: pending.count, delivered: delivered.count });
 });
-
+// Test endpoint
+app.post('/api/test-order', (req, res) => {
+  db.prepare('INSERT INTO orders (service, platform, link, quantity, amount, email, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    'Abonnés Instagram', 'Instagram', 'https://instagram.com/test', 1000, 9.75, 'test@gmail.com', 'pending'
+  );
+  res.json({ success: true });
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
