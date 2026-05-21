@@ -238,6 +238,22 @@ app.delete('/api/admin/promos/:id', adminMiddleware, (req, res) => {
   res.json({ success: true });
 });
 
+
+// Admin - reset client password
+app.patch('/api/admin/users/:id/password', adminMiddleware, (req, res) => {
+  const { password } = req.body;
+  if (!password || password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court' });
+  const hash = bcrypt.hashSync(password, 10);
+  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.params.id);
+  res.json({ success: true });
+});
+
+// Admin - delete client
+app.delete('/api/admin/users/:id', adminMiddleware, (req, res) => {
+  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
 // Test endpoint
 app.post('/api/test-order', (req, res) => {
   db.prepare('INSERT INTO orders (service, platform, link, quantity, amount, email, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
