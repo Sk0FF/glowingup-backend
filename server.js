@@ -4,67 +4,82 @@ const cors = require('cors');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 
 const app = express();
-const db = new Database('glowingup.db');
 
-// Init DB
-db.exec(`
-  CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service TEXT, platform TEXT, link TEXT,
-    quantity INTEGER, amount REAL,
-    status TEXT DEFAULT 'pending',
-    email TEXT, user_id INTEGER,
-    promo_code TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS admin (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE, password TEXT
-  );
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE, password TEXT, name TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS promo_codes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT UNIQUE,
-    discount INTEGER,
-    max_uses INTEGER DEFAULT 1,
-    uses INTEGER DEFAULT 0,
-    active INTEGER DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS promo_uses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT, email TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+// PostgreSQL connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal') 
+    ? false 
+    : { rejectUnauthorized: false }
+});
 
-// Create admin
-const adminExists = db.prepare('SELECT * FROM admin WHERE email = ?').get(process.env.ADMIN_EMAIL);
-if (!adminExists) {
-  const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
-  db.prepare('INSERT INTO admin (email, password) VALUES (?, ?)').run(process.env.ADMIN_EMAIL, hash);
+// Init tables
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id SERIAL PRIMARY KEY,
+      service TEXT, platform TEXT, link TEXT,
+      quantity INTEGER, amount REAL,
+      status TEXT DEFAULT 'pending',
+      email TEXT, user_id INTEGER,
+      promo_code TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS admin (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE, password TEXT
+    );
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE, password TEXT, name TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS promo_codes (
+      id SERIAL PRIMARY KEY,
+      code TEXT UNIQUE,
+      discount INTEGER,
+      max_uses INTEGER DEFAULT 9999,
+      uses INTEGER DEFAULT 0,
+      active INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS promo_uses (
+      id SERIAL PRIMARY KEY,
+      code TEXT, email TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Create admin if not exists
+  const adminRes = await pool.query('SELECT * FROM admin WHERE email = $1', [process.env.ADMIN_EMAIL]);
+  if (adminRes.rows.length === 0) {
+    const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
+    await pool.query('INSERT INTO admin (email, password) VALUES ($1, $2)', [process.env.ADMIN_EMAIL, hash]);
+    console.log('Admin created');
+  }
+
+  // Create default promo code
+  const promoRes = await pool.query('SELECT * FROM promo_codes WHERE code = $1', ['GLOW20']);
+  if (promoRes.rows.length === 0) {
+    await pool.query('INSERT INTO promo_codes (code, discount, max_uses) VALUES ($1, $2, $3)', ['GLOW20', 20, 9999]);
+  }
+
+  console.log('Database initialized');
 }
 
-// Create default promo code GLOW20
-const promoExists = db.prepare('SELECT * FROM promo_codes WHERE code = ?').get('GLOW20');
-if (!promoExists) {
-  db.prepare('INSERT INTO promo_codes (code, discount, max_uses, uses, active) VALUES (?, ?, ?, ?, ?)').run('GLOW20', 20, 9999, 0, 1);
-}
+initDB().catch(console.error);
 
 app.use(cors());
 app.use(express.json());
 
 // ── ADMIN AUTH ──
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const { email, password } = req.body;
-  const admin = db.prepare('SELECT * FROM admin WHERE email = ?').get(email);
+  const result = await pool.query('SELECT * FROM admin WHERE email = $1', [email]);
+  const admin = result.rows[0];
   if (!admin || !bcrypt.compareSync(password, admin.password)) return res.status(401).json({ error: 'Identifiants incorrects' });
   const token = jwt.sign({ id: admin.id, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '7d' });
   res.json({ token });
@@ -82,20 +97,21 @@ function adminMiddleware(req, res, next) {
 }
 
 // ── CLIENT AUTH ──
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: 'Champs manquants' });
-  const existing = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (existing) return res.status(400).json({ error: 'Email déjà utilisé' });
+  const existing = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+  if (existing.rows.length > 0) return res.status(400).json({ error: 'Email déjà utilisé' });
   const hash = bcrypt.hashSync(password, 10);
-  const result = db.prepare('INSERT INTO users (email, password, name) VALUES (?, ?, ?)').run(email, hash, name);
-  const token = jwt.sign({ id: result.lastInsertRowid, role: 'user' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-  res.json({ token, user: { id: result.lastInsertRowid, email, name } });
+  const result = await pool.query('INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id', [email, hash, name]);
+  const token = jwt.sign({ id: result.rows[0].id, role: 'user' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, user: { id: result.rows[0].id, email, name } });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+  const user = result.rows[0];
   if (!user || !bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
   const token = jwt.sign({ id: user.id, role: 'user' }, process.env.JWT_SECRET, { expiresIn: '30d' });
   res.json({ token, user: { id: user.id, email: user.email, name: user.name } });
@@ -109,27 +125,27 @@ function userMiddleware(req, res, next) {
 }
 
 // ── CLIENT ROUTES ──
-app.get('/api/user/orders', userMiddleware, (req, res) => {
-  const orders = db.prepare('SELECT * FROM orders WHERE user_id = ? OR email = (SELECT email FROM users WHERE id = ?) ORDER BY created_at DESC').all(req.user.id, req.user.id);
-  res.json(orders);
+app.get('/api/user/orders', userMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT * FROM orders WHERE user_id = $1 OR email = (SELECT email FROM users WHERE id = $1) ORDER BY created_at DESC', [req.user.id]);
+  res.json(result.rows);
 });
 
-app.get('/api/user/me', userMiddleware, (req, res) => {
-  const user = db.prepare('SELECT id, email, name, created_at FROM users WHERE id = ?').get(req.user.id);
-  res.json(user);
+app.get('/api/user/me', userMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT id, email, name, created_at FROM users WHERE id = $1', [req.user.id]);
+  res.json(result.rows[0]);
 });
 
 // ── PROMO CODES ──
-app.post('/api/promo/check', (req, res) => {
+app.post('/api/promo/check', async (req, res) => {
   const { code, email } = req.body;
   if (!code) return res.status(400).json({ error: 'Code manquant' });
-  const promo = db.prepare('SELECT * FROM promo_codes WHERE code = ? AND active = 1').get(code.toUpperCase());
+  const result = await pool.query('SELECT * FROM promo_codes WHERE code = $1 AND active = 1', [code.toUpperCase()]);
+  const promo = result.rows[0];
   if (!promo) return res.status(404).json({ error: 'Code invalide ou expiré' });
   if (promo.uses >= promo.max_uses) return res.status(400).json({ error: 'Code épuisé' });
-  // Check if email already used this code
   if (email) {
-    const alreadyUsed = db.prepare('SELECT * FROM promo_uses WHERE code = ? AND email = ?').get(code.toUpperCase(), email);
-    if (alreadyUsed) return res.status(400).json({ error: 'Tu as déjà utilisé ce code' });
+    const used = await pool.query('SELECT * FROM promo_uses WHERE code = $1 AND email = $2', [code.toUpperCase(), email]);
+    if (used.rows.length > 0) return res.status(400).json({ error: 'Tu as déjà utilisé ce code' });
   }
   res.json({ valid: true, discount: promo.discount, code: promo.code });
 });
@@ -140,17 +156,7 @@ app.post('/api/create-checkout', async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: [{
-        price_data: {
-          currency: 'eur',
-          product_data: {
-            name: `${service} — ${quantity} unités`,
-            description: promo_code ? `Code promo: ${promo_code} (-${Math.round((1 - amount/original_amount)*100)}%) | Lien: ${link}` : `Lien: ${link}`
-          },
-          unit_amount: Math.round(amount * 100),
-        },
-        quantity: 1,
-      }],
+      line_items: [{ price_data: { currency: 'eur', product_data: { name: `${service} — ${quantity} unités`, description: `Lien: ${link}` }, unit_amount: Math.round(amount * 100) }, quantity: 1 }],
       mode: 'payment',
       customer_email: email,
       success_url: `${process.env.FRONTEND_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
@@ -162,7 +168,7 @@ app.post('/api/create-checkout', async (req, res) => {
 });
 
 // ── STRIPE WEBHOOK ──
-app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
   try { event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET); }
@@ -171,94 +177,85 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) =
     const s = event.data.object;
     const m = s.metadata;
     const userId = m.user_id ? parseInt(m.user_id) : null;
-    db.prepare('INSERT INTO orders (service, platform, link, quantity, amount, email, status, user_id, promo_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      m.service, m.platform, m.link, parseInt(m.quantity), parseFloat(m.amount), m.email, 'pending', userId, m.promo_code||null
-    );
-    // Mark promo code as used
+    await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status, user_id, promo_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      [m.service, m.platform, m.link, parseInt(m.quantity), parseFloat(m.amount), m.email, 'pending', userId, m.promo_code||null]);
     if (m.promo_code) {
-      db.prepare('UPDATE promo_codes SET uses = uses + 1 WHERE code = ?').run(m.promo_code);
-      db.prepare('INSERT INTO promo_uses (code, email) VALUES (?, ?)').run(m.promo_code, m.email);
+      await pool.query('UPDATE promo_codes SET uses = uses + 1 WHERE code = $1', [m.promo_code]);
+      await pool.query('INSERT INTO promo_uses (code, email) VALUES ($1, $2)', [m.promo_code, m.email]);
     }
   }
   res.json({ received: true });
 });
 
 // ── ADMIN ROUTES ──
-app.get('/api/admin/orders', adminMiddleware, (req, res) => {
-  const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
-  res.json(orders);
+app.get('/api/admin/orders', adminMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
+  res.json(result.rows);
 });
 
-app.patch('/api/admin/orders/:id', adminMiddleware, (req, res) => {
-  const { status } = req.body;
-  db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, req.params.id);
+app.patch('/api/admin/orders/:id', adminMiddleware, async (req, res) => {
+  await pool.query('UPDATE orders SET status = $1 WHERE id = $2', [req.body.status, req.params.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/admin/orders/:id', adminMiddleware, (req, res) => {
-  db.prepare('DELETE FROM orders WHERE id = ?').run(req.params.id);
+app.delete('/api/admin/orders/:id', adminMiddleware, async (req, res) => {
+  await pool.query('DELETE FROM orders WHERE id = $1', [req.params.id]);
   res.json({ success: true });
 });
 
-app.get('/api/admin/stats', adminMiddleware, (req, res) => {
-  const total = db.prepare('SELECT COUNT(*) as count, SUM(amount) as revenue FROM orders').get();
-  const pending = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'").get();
-  const delivered = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'delivered'").get();
-  const users = db.prepare('SELECT COUNT(*) as count FROM users').get();
-  res.json({ total: total.count, revenue: total.revenue || 0, pending: pending.count, delivered: delivered.count, users: users.count });
+app.get('/api/admin/stats', adminMiddleware, async (req, res) => {
+  const total = await pool.query('SELECT COUNT(*) as count, SUM(amount) as revenue FROM orders');
+  const pending = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'");
+  const delivered = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status = 'delivered'");
+  const users = await pool.query('SELECT COUNT(*) as count FROM users');
+  res.json({ total: parseInt(total.rows[0].count), revenue: parseFloat(total.rows[0].revenue)||0, pending: parseInt(pending.rows[0].count), delivered: parseInt(delivered.rows[0].count), users: parseInt(users.rows[0].count) });
 });
 
-app.get('/api/admin/users', adminMiddleware, (req, res) => {
-  const users = db.prepare('SELECT id, email, name, created_at FROM users ORDER BY created_at DESC').all();
-  res.json(users);
+app.get('/api/admin/users', adminMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT id, email, name, created_at FROM users ORDER BY created_at DESC');
+  res.json(result.rows);
 });
 
-// Promo admin routes
-app.get('/api/admin/promos', adminMiddleware, (req, res) => {
-  const promos = db.prepare('SELECT * FROM promo_codes ORDER BY created_at DESC').all();
-  res.json(promos);
+app.patch('/api/admin/users/:id/password', adminMiddleware, async (req, res) => {
+  const { password } = req.body;
+  if (!password || password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court' });
+  const hash = bcrypt.hashSync(password, 10);
+  await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hash, req.params.id]);
+  res.json({ success: true });
 });
 
-app.post('/api/admin/promos', adminMiddleware, (req, res) => {
+app.delete('/api/admin/users/:id', adminMiddleware, async (req, res) => {
+  await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
+});
+
+app.get('/api/admin/promos', adminMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT * FROM promo_codes ORDER BY created_at DESC');
+  res.json(result.rows);
+});
+
+app.post('/api/admin/promos', adminMiddleware, async (req, res) => {
   const { code, discount, max_uses } = req.body;
   try {
-    db.prepare('INSERT INTO promo_codes (code, discount, max_uses) VALUES (?, ?, ?)').run(code.toUpperCase(), discount, max_uses||1);
+    await pool.query('INSERT INTO promo_codes (code, discount, max_uses) VALUES ($1, $2, $3)', [code.toUpperCase(), discount, max_uses||9999]);
     res.json({ success: true });
   } catch { res.status(400).json({ error: 'Code déjà existant' }); }
 });
 
-app.patch('/api/admin/promos/:id', adminMiddleware, (req, res) => {
-  const { active } = req.body;
-  db.prepare('UPDATE promo_codes SET active = ? WHERE id = ?').run(active, req.params.id);
+app.patch('/api/admin/promos/:id', adminMiddleware, async (req, res) => {
+  await pool.query('UPDATE promo_codes SET active = $1 WHERE id = $2', [req.body.active, req.params.id]);
   res.json({ success: true });
 });
 
-app.delete('/api/admin/promos/:id', adminMiddleware, (req, res) => {
-  db.prepare('DELETE FROM promo_codes WHERE id = ?').run(req.params.id);
+app.delete('/api/admin/promos/:id', adminMiddleware, async (req, res) => {
+  await pool.query('DELETE FROM promo_codes WHERE id = $1', [req.params.id]);
   res.json({ success: true });
 });
 
-
-// Admin - reset client password
-app.patch('/api/admin/users/:id/password', adminMiddleware, (req, res) => {
-  const { password } = req.body;
-  if (!password || password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court' });
-  const hash = bcrypt.hashSync(password, 10);
-  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.params.id);
-  res.json({ success: true });
-});
-
-// Admin - delete client
-app.delete('/api/admin/users/:id', adminMiddleware, (req, res) => {
-  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
-  res.json({ success: true });
-});
-
-// Test endpoint
-app.post('/api/test-order', (req, res) => {
-  db.prepare('INSERT INTO orders (service, platform, link, quantity, amount, email, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    'Abonnés Instagram', 'Instagram', 'https://instagram.com/test', 1000, 9.75, 'test@gmail.com', 'pending'
-  );
+// Test order
+app.post('/api/test-order', async (req, res) => {
+  await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    ['Abonnés Instagram', 'Instagram', 'https://instagram.com/test', 1000, 9.75, 'test@gmail.com', 'pending']);
   res.json({ success: true });
 });
 
