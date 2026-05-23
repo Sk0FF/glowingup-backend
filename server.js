@@ -6,6 +6,25 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 
+
+// ── TELEGRAM NOTIFICATIONS ──
+async function sendTelegramNotif(message){
+  try {
+    const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+    const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+    if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: 'HTML'
+      })
+    });
+  } catch(e) { console.log('Telegram error:', e.message); }
+}
+
 const app = express();
 
 // PostgreSQL connection
@@ -179,6 +198,18 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
     const userId = m.user_id ? parseInt(m.user_id) : null;
     await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status, user_id, promo_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
       [m.service, m.platform, m.link, parseInt(m.quantity), parseFloat(m.amount), m.email, 'pending', userId, m.promo_code||null]);
+    
+    // Send Telegram notification
+    const msg = `🛒 <b>NOUVELLE COMMANDE !</b>\n\n` +
+      `📦 <b>Service :</b> ${m.service}\n` +
+      `📱 <b>Plateforme :</b> ${m.platform}\n` +
+      `🔢 <b>Quantité :</b> ${parseInt(m.quantity).toLocaleString()}\n` +
+      `💰 <b>Montant :</b> ${parseFloat(m.amount).toFixed(2)}€\n` +
+      `${m.promo_code ? '🎟 <b>Code promo :</b> ' + m.promo_code + '\n' : ''}` +
+      `📧 <b>Email :</b> ${m.email}\n` +
+      `🔗 <b>Lien :</b> ${m.link}\n\n` +
+      `⏰ ${new Date().toLocaleString('fr-FR')}`;
+    await sendTelegramNotif(msg);
     if (m.promo_code) {
       await pool.query('UPDATE promo_codes SET uses = uses + 1 WHERE code = $1', [m.promo_code]);
       await pool.query('INSERT INTO promo_uses (code, email) VALUES ($1, $2)', [m.promo_code, m.email]);
