@@ -45,8 +45,10 @@ async function initDB() {
       status TEXT DEFAULT 'pending',
       email TEXT, user_id INTEGER,
       promo_code TEXT,
+      id_service TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS id_service TEXT;
     CREATE TABLE IF NOT EXISTS admin (
       id SERIAL PRIMARY KEY,
       email TEXT UNIQUE, password TEXT
@@ -92,7 +94,13 @@ async function initDB() {
 initDB().catch(console.error);
 
 app.use(cors());
-app.use(express.json());
+app.use((req, res, next) => {
+  if(req.originalUrl === '/api/webhook') {
+    express.raw({type: '*/*'})(req, res, next);
+  } else {
+    express.json()(req, res, next);
+  }
+});
 
 // ── ADMIN AUTH ──
 app.post('/api/admin/login', async (req, res) => {
@@ -187,7 +195,7 @@ app.post('/api/create-checkout', async (req, res) => {
 });
 
 // ── STRIPE WEBHOOK ──
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+app.post('/api/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
   try { event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET); }
@@ -196,8 +204,8 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
     const s = event.data.object;
     const m = s.metadata;
     const userId = m.user_id ? parseInt(m.user_id) : null;
-    await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status, user_id, promo_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-      [m.service, m.platform, m.link, parseInt(m.quantity), parseFloat(m.amount), m.email, 'pending', userId, m.promo_code||null]);
+    await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status, user_id, promo_code, id_service) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      [m.service, m.platform, m.link, parseInt(m.quantity), parseFloat(m.amount), m.email, 'pending', userId, m.promo_code||null, m.id_service||null]);
     
     // Send Telegram notification
     const msg = `🛒 <b>NOUVELLE COMMANDE !</b>\n\n` +
