@@ -326,6 +326,18 @@ app.get('/api/test-telegram', async (req, res) => {
 app.post('/api/test-order', async (req, res) => {
   await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status) VALUES ($1,$2,$3,$4,$5,$6,$7)',
     ['Abonnés Instagram', 'Instagram', 'https://instagram.com/test', 1000, 9.75, 'test@gmail.com', 'pending']);
+  
+  // Send Telegram notification
+  const msg = `🛒 <b>NOUVELLE COMMANDE !</b>\n\n` +
+    `📦 <b>Service :</b> Abonnés Instagram\n` +
+    `📱 <b>Plateforme :</b> Instagram\n` +
+    `🔢 <b>Quantité :</b> 1 000\n` +
+    `💰 <b>Montant :</b> 9.75€\n` +
+    `📧 <b>Email :</b> test@gmail.com\n` +
+    `🔗 <b>Lien :</b> https://instagram.com/test\n\n` +
+    `⏰ ${new Date().toLocaleString('fr-FR')}`;
+  await sendTelegramNotif(msg);
+  
   res.json({ success: true });
 });
 
