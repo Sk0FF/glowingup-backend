@@ -13,15 +13,15 @@ async function sendTelegramNotif(message){
     const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
     const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
     if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: 'HTML'
+    // Send to all chat IDs (comma separated)
+    const chatIds = TELEGRAM_CHAT_ID.split(',').map(id => id.trim());
+    await Promise.all(chatIds.map(chatId =>
+      fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' })
       })
-    });
+    ));
   } catch(e) { console.log('Telegram error:', e.message); }
 }
 
@@ -300,6 +300,26 @@ app.get('/api/admin/payments', adminMiddleware, async (req, res) => {
     }));
     res.json(payments);
   } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+
+// Test Telegram
+app.get('/api/test-telegram', async (req, res) => {
+  try {
+    const token = process.env.TELEGRAM_TOKEN;
+    const chatIds = (process.env.TELEGRAM_CHAT_ID || '').split(',').map(id => id.trim());
+    const results = [];
+    for(const chatId of chatIds){
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ chat_id: chatId, text: '🧪 Test GlowingUp — Telegram fonctionne !', parse_mode: 'HTML' })
+      });
+      const data = await r.json();
+      results.push({ chatId, ok: data.ok, error: data.description });
+    }
+    res.json({ token_set: !!token, chat_ids: chatIds, results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // Test order
