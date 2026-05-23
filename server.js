@@ -252,6 +252,25 @@ app.delete('/api/admin/promos/:id', adminMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+
+// ── STRIPE PAYMENTS HISTORY ──
+app.get('/api/admin/payments', adminMiddleware, async (req, res) => {
+  try {
+    const charges = await stripe.paymentIntents.list({ limit: 50 });
+    const payments = charges.data.map(p => ({
+      id: p.id,
+      amount: p.amount / 100,
+      currency: p.currency,
+      status: p.status,
+      email: p.receipt_email || p.metadata?.email || '—',
+      description: p.description || p.metadata?.service || '—',
+      created: new Date(p.created * 1000).toISOString(),
+      receipt_url: p.charges?.data[0]?.receipt_url || null
+    }));
+    res.json(payments);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 // Test order
 app.post('/api/test-order', async (req, res) => {
   await pool.query('INSERT INTO orders (service, platform, link, quantity, amount, email, status) VALUES ($1,$2,$3,$4,$5,$6,$7)',
