@@ -295,7 +295,7 @@ app.delete('/api/admin/promos/:id', adminMiddleware, async (req, res) => {
 // ── STRIPE PAYMENTS HISTORY ──
 app.get('/api/admin/payments', adminMiddleware, async (req, res) => {
   try {
-    const charges = await stripe.paymentIntents.list({ limit: 50 });
+    const charges = await stripe.checkout.sessions.list({ limit: 50 });
     const payments = charges.data.map(p => ({
       id: p.id,
       amount: p.amount / 100,
