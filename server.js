@@ -60,6 +60,15 @@ async function initDB() {
       current_period_end TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id SERIAL PRIMARY KEY,
+      admin_id INTEGER,
+      admin_email TEXT,
+      action TEXT,
+      details TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    ALTER TABLE admin ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;
     CREATE TABLE IF NOT EXISTS promo_uses (
       id SERIAL PRIMARY KEY,
       code TEXT, email TEXT,
@@ -100,6 +109,15 @@ async function sendTelegramNotif(message) {
   } catch (e) { console.log('Telegram error:', e.message); }
 }
 
+
+// ── ACTIVITY LOG ──
+async function logActivity(adminId, adminEmail, action, details=''){
+  try {
+    await pool.query('INSERT INTO activity_log (admin_id, admin_email, action, details) VALUES ($1,$2,$3,$4)',
+      [adminId, adminEmail, action, details]);
+  } catch(e){ console.log('Log error:', e.message); }
+}
+
 app.use(cors());
 
 // IMPORTANT: Raw body for Stripe webhook verification
@@ -117,6 +135,8 @@ app.post('/api/admin/login', async (req, res) => {
   const result = await pool.query('SELECT * FROM admin WHERE email = $1', [email]);
   const admin = result.rows[0];
   if (!admin || !bcrypt.compareSync(password, admin.password)) return res.status(401).json({ error: 'Identifiants incorrects' });
+  await pool.query('UPDATE admin SET last_login = NOW() WHERE id = $1', [admin.id]);
+  await logActivity(admin.id, admin.email, 'LOGIN', 'Connexion au dashboard');
   const token = jwt.sign({ id: admin.id, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '7d' });
   res.json({ token });
 });
@@ -287,11 +307,15 @@ app.get('/api/admin/orders', adminMiddleware, async (req, res) => {
 });
 
 app.patch('/api/admin/orders/:id', adminMiddleware, async (req, res) => {
+  const order = await pool.query('SELECT service, email FROM orders WHERE id = $1', [req.params.id]);
   await pool.query('UPDATE orders SET status = $1 WHERE id = $2', [req.body.status, req.params.id]);
+  const o = order.rows[0];
+  await logActivity(req.admin.id, '', 'ORDER_UPDATE', `Commande #${req.params.id} → ${req.body.status} (${o?.service||''} - ${o?.email||''})`);
   res.json({ success: true });
 });
 
 app.delete('/api/admin/orders/:id', adminMiddleware, async (req, res) => {
+  await logActivity(req.admin.id, '', 'ORDER_DELETE', `Commande #${req.params.id} supprimée`);
   await pool.query('DELETE FROM orders WHERE id = $1', [req.params.id]);
   res.json({ success: true });
 });
@@ -318,6 +342,8 @@ app.patch('/api/admin/users/:id/password', adminMiddleware, async (req, res) => 
 });
 
 app.delete('/api/admin/users/:id', adminMiddleware, async (req, res) => {
+  const user = await pool.query('SELECT email FROM users WHERE id = $1', [req.params.id]);
+  await logActivity(req.admin.id, '', 'CLIENT_DELETE', `Client supprimé: ${user.rows[0]?.email||''}`);
   await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
   res.json({ success: true });
 });
@@ -331,6 +357,7 @@ app.post('/api/admin/promos', adminMiddleware, async (req, res) => {
   const { code, discount, max_uses } = req.body;
   try {
     await pool.query('INSERT INTO promo_codes (code, discount, max_uses) VALUES ($1, $2, $3)', [code.toUpperCase(), discount, max_uses || 9999]);
+    await logActivity(req.admin.id, '', 'PROMO_CREATE', `Code promo créé: ${code.toUpperCase()} (-${discount}%)`);
     res.json({ success: true });
   } catch { res.status(400).json({ error: 'Code déjà existant' }); }
 });
@@ -461,6 +488,28 @@ app.patch('/api/admin/admins/:id/password', adminMiddleware, async (req, res) =>
   const hash = bcrypt.hashSync(password, 10);
   await pool.query('UPDATE admin SET password = $1 WHERE id = $2', [hash, req.params.id]);
   res.json({ success: true });
+});
+
+
+// ── ACTIVITY LOG ROUTES ──
+app.get('/api/admin/activity', adminMiddleware, async (req, res) => {
+  const result = await pool.query(`
+    SELECT l.*, a.email as admin_email_real 
+    FROM activity_log l 
+    LEFT JOIN admin a ON l.admin_id = a.id 
+    ORDER BY l.created_at DESC LIMIT 100
+  `);
+  res.json(result.rows);
+});
+
+app.get('/api/admin/admins-stats', adminMiddleware, async (req, res) => {
+  const admins = await pool.query('SELECT id, email, last_login FROM admin ORDER BY id');
+  const stats = await Promise.all(admins.rows.map(async a => {
+    const actions = await pool.query('SELECT COUNT(*) as count FROM activity_log WHERE admin_id = $1', [a.id]);
+    const orders = await pool.query("SELECT COUNT(*) as count FROM activity_log WHERE admin_id = $1 AND action = 'ORDER_UPDATE'", [a.id]);
+    return { ...a, total_actions: parseInt(actions.rows[0].count), orders_processed: parseInt(orders.rows[0].count) };
+  }));
+  res.json(stats);
 });
 
 // ── TEST ROUTES ──
