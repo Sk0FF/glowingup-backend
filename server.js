@@ -31,8 +31,10 @@ async function initDB() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS id_service TEXT;
     CREATE TABLE IF NOT EXISTS admin (
       id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE, password TEXT
+      email TEXT UNIQUE, password TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE admin ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       email TEXT UNIQUE, password TEXT, name TEXT,
