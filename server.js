@@ -428,6 +428,39 @@ app.get('/api/admin/subscriptions', adminMiddleware, async (req, res) => {
   res.json(result.rows);
 });
 
+
+// ── ADMIN MANAGEMENT ──
+app.get('/api/admin/admins', adminMiddleware, async (req, res) => {
+  const result = await pool.query('SELECT id, email, created_at FROM admin ORDER BY id');
+  res.json(result.rows);
+});
+
+app.post('/api/admin/admins', adminMiddleware, async (req, res) => {
+  const { email, password } = req.body;
+  if(!email || !password) return res.status(400).json({ error: 'Champs manquants' });
+  try {
+    const hash = bcrypt.hashSync(password, 10);
+    await pool.query('INSERT INTO admin (email, password) VALUES ($1, $2)', [email, hash]);
+    res.json({ success: true });
+  } catch { res.status(400).json({ error: 'Email déjà utilisé' }); }
+});
+
+app.delete('/api/admin/admins/:id', adminMiddleware, async (req, res) => {
+  // Prevent deleting main admin
+  const main = await pool.query('SELECT id FROM admin WHERE email = $1', [process.env.ADMIN_EMAIL]);
+  if(main.rows[0]?.id == req.params.id) return res.status(400).json({ error: 'Impossible de supprimer le compte principal' });
+  await pool.query('DELETE FROM admin WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
+});
+
+app.patch('/api/admin/admins/:id/password', adminMiddleware, async (req, res) => {
+  const { password } = req.body;
+  if(!password || password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court' });
+  const hash = bcrypt.hashSync(password, 10);
+  await pool.query('UPDATE admin SET password = $1 WHERE id = $2', [hash, req.params.id]);
+  res.json({ success: true });
+});
+
 // ── TEST ROUTES ──
 app.get('/api/test-telegram', async (req, res) => {
   try {
